@@ -1,0 +1,11 @@
+{
+	"device_specs":[
+		{
+			"type":"4090",
+			"mem_mb":24564,
+			"latency_prof_file": "data/4090/latency.csv",
+			"interference_const_file": "data/4090/int_model_constant.csv",
+			"interference_util_file": "data/4090/profile.csv"
+		}
+	]
+}

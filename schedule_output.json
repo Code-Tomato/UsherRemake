@@ -1,0 +1,307 @@
+{
+  "cluster_type": "non-fixed",
+  "gpu_type": "4090",
+  "total_gpus": 17,
+  "assignments": [
+    {
+      "model": "ssd-mobilenetv1",
+      "batch_size": 8,
+      "gpu_id": 0,
+      "gpu_type": "4090"
+    },
+    {
+      "model": "ssd-mobilenetv1",
+      "batch_size": 8,
+      "gpu_id": 0,
+      "gpu_type": "4090"
+    },
+    {
+      "model": "ssd-mobilenetv1",
+      "batch_size": 8,
+      "gpu_id": 1,
+      "gpu_type": "4090"
+    },
+    {
+      "model": "ssd-mobilenetv1",
+      "batch_size": 8,
+      "gpu_id": 1,
+      "gpu_type": "4090"
+    },
+    {
+      "model": "lenet",
+      "batch_size": 8,
+      "gpu_id": 2,
+      "gpu_type": "4090"
+    },
+    {
+      "model": "lenet",
+      "batch_size": 8,
+      "gpu_id": 2,
+      "gpu_type": "4090"
+    },
+    {
+      "model": "ssd-mobilenetv1",
+      "batch_size": 8,
+      "gpu_id": 2,
+      "gpu_type": "4090"
+    },
+    {
+      "model": "ssd-mobilenetv1",
+      "batch_size": 8,
+      "gpu_id": 3,
+      "gpu_type": "4090"
+    },
+    {
+      "model": "lenet",
+      "batch_size": 8,
+      "gpu_id": 3,
+      "gpu_type": "4090"
+    },
+    {
+      "model": "lenet",
+      "batch_size": 8,
+      "gpu_id": 3,
+      "gpu_type": "4090"
+    },
+    {
+      "model": "lenet",
+      "batch_size": 8,
+      "gpu_id": 3,
+      "gpu_type": "4090"
+    },
+    {
+      "model": "lenet",
+      "batch_size": 8,
+      "gpu_id": 3,
+      "gpu_type": "4090"
+    },
+    {
+      "model": "bert",
+      "batch_size": 8,
+      "gpu_id": 3,
+      "gpu_type": "4090"
+    },
+    {
+      "model": "bert",
+      "batch_size": 8,
+      "gpu_id": 2,
+      "gpu_type": "4090"
+    },
+    {
+      "model": "bert",
+      "batch_size": 8,
+      "gpu_id": 2,
+      "gpu_type": "4090"
+    },
+    {
+      "model": "bert",
+      "batch_size": 8,
+      "gpu_id": 4,
+      "gpu_type": "4090"
+    },
+    {
+      "model": "googlenet",
+      "batch_size": 8,
+      "gpu_id": 4,
+      "gpu_type": "4090"
+    },
+    {
+      "model": "googlenet",
+      "batch_size": 8,
+      "gpu_id": 4,
+      "gpu_type": "4090"
+    },
+    {
+      "model": "googlenet",
+      "batch_size": 8,
+      "gpu_id": 5,
+      "gpu_type": "4090"
+    },
+    {
+      "model": "bert",
+      "batch_size": 8,
+      "gpu_id": 5,
+      "gpu_type": "4090"
+    },
+    {
+      "model": "vgg16",
+      "batch_size": 8,
+      "gpu_id": 5,
+      "gpu_type": "4090"
+    },
+    {
+      "model": "googlenet",
+      "batch_size": 8,
+      "gpu_id": 6,
+      "gpu_type": "4090"
+    },
+    {
+      "model": "googlenet",
+      "batch_size": 8,
+      "gpu_id": 6,
+      "gpu_type": "4090"
+    },
+    {
+      "model": "googlenet",
+      "batch_size": 8,
+      "gpu_id": 6,
+      "gpu_type": "4090"
+    },
+    {
+      "model": "vgg16",
+      "batch_size": 16,
+      "gpu_id": 7,
+      "gpu_type": "4090"
+    },
+    {
+      "model": "vgg16",
+      "batch_size": 16,
+      "gpu_id": 7,
+      "gpu_type": "4090"
+    },
+    {
+      "model": "vgg16",
+      "batch_size": 16,
+      "gpu_id": 8,
+      "gpu_type": "4090"
+    },
+    {
+      "model": "vgg16",
+      "batch_size": 16,
+      "gpu_id": 8,
+      "gpu_type": "4090"
+    },
+    {
+      "model": "vgg16",
+      "batch_size": 8,
+      "gpu_id": 9,
+      "gpu_type": "4090"
+    },
+    {
+      "model": "mnasnet1_0",
+      "batch_size": 8,
+      "gpu_id": 9,
+      "gpu_type": "4090"
+    },
+    {
+      "model": "mnasnet1_0",
+      "batch_size": 8,
+      "gpu_id": 10,
+      "gpu_type": "4090"
+    },
+    {
+      "model": "mnasnet1_0",
+      "batch_size": 8,
+      "gpu_id": 10,
+      "gpu_type": "4090"
+    },
+    {
+      "model": "densenet161",
+      "batch_size": 8,
+      "gpu_id": 10,
+      "gpu_type": "4090"
+    },
+    {
+      "model": "densenet161",
+      "batch_size": 8,
+      "gpu_id": 11,
+      "gpu_type": "4090"
+    },
+    {
+      "model": "mnasnet1_0",
+      "batch_size": 8,
+      "gpu_id": 11,
+      "gpu_type": "4090"
+    },
+    {
+      "model": "mnasnet1_0",
+      "batch_size": 8,
+      "gpu_id": 11,
+      "gpu_type": "4090"
+    },
+    {
+      "model": "resnet50",
+      "batch_size": 8,
+      "gpu_id": 12,
+      "gpu_type": "4090"
+    },
+    {
+      "model": "densenet161",
+      "batch_size": 8,
+      "gpu_id": 12,
+      "gpu_type": "4090"
+    },
+    {
+      "model": "densenet161",
+      "batch_size": 8,
+      "gpu_id": 12,
+      "gpu_type": "4090"
+    },
+    {
+      "model": "densenet161",
+      "batch_size": 8,
+      "gpu_id": 13,
+      "gpu_type": "4090"
+    },
+    {
+      "model": "resnet50",
+      "batch_size": 8,
+      "gpu_id": 13,
+      "gpu_type": "4090"
+    },
+    {
+      "model": "resnet50",
+      "batch_size": 8,
+      "gpu_id": 13,
+      "gpu_type": "4090"
+    },
+    {
+      "model": "resnet50",
+      "batch_size": 8,
+      "gpu_id": 14,
+      "gpu_type": "4090"
+    },
+    {
+      "model": "resnet50",
+      "batch_size": 8,
+      "gpu_id": 14,
+      "gpu_type": "4090"
+    },
+    {
+      "model": "resnet50",
+      "batch_size": 8,
+      "gpu_id": 14,
+      "gpu_type": "4090"
+    },
+    {
+      "model": "mobilenet_v2",
+      "batch_size": 8,
+      "gpu_id": 15,
+      "gpu_type": "4090"
+    },
+    {
+      "model": "mobilenet_v2",
+      "batch_size": 8,
+      "gpu_id": 15,
+      "gpu_type": "4090"
+    },
+    {
+      "model": "mobilenet_v2",
+      "batch_size": 8,
+      "gpu_id": 15,
+      "gpu_type": "4090"
+    },
+    {
+      "model": "mobilenet_v2",
+      "batch_size": 8,
+      "gpu_id": 16,
+      "gpu_type": "4090"
+    },
+    {
+      "model": "mobilenet_v2",
+      "batch_size": 8,
+      "gpu_id": 16,
+      "gpu_type": "4090"
+    }
+  ]
+}
