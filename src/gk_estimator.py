@@ -4,7 +4,7 @@ import os
 class GKEstimator:
    def __init__(self, gpu_type='4090'):
       self.gpu_type = gpu_type
-      self.profile_data = {}  # {model_name: {batch_size: {c_util, m_util, duration, l2_util}}}
+      self.profile_data = {}  # {model_name: {batch_size: {c_util, m_util, l2_util}}}
       self.latency_data = {}  # {model_name: {partition: {batch_size: latency}}}
       self.interference_constants = {}  # Interference modeling constants
       self.load_profile_data()
@@ -14,9 +14,6 @@ class GKEstimator:
    def load_profile_data(self):
       """Load profiling data from profile.csv"""
       profile_path = f'data/{self.gpu_type}/profile.csv'
-      if not os.path.exists(profile_path):
-         profile_path = 'data/4090/profile.csv'
-      
       with open(profile_path, 'r') as f:
          lines = f.readlines()
       
@@ -24,10 +21,9 @@ class GKEstimator:
          parts = line.strip().split(',')
          model_name = parts[0].strip()
          batch_size = int(parts[1].strip())
-         duration = float(parts[2].strip())
-         sm_util = float(parts[3].strip())
-         l2_util = float(parts[4].strip())
-         mem_util = float(parts[5].strip())
+         sm_util = float(parts[2].strip())
+         l2_util = float(parts[3].strip())
+         mem_util = float(parts[4].strip())
          
          if model_name not in self.profile_data:
             self.profile_data[model_name] = {}
@@ -35,16 +31,12 @@ class GKEstimator:
          self.profile_data[model_name][batch_size] = {
             'c_util': sm_util,
             'm_util': mem_util,
-            'l2_util': l2_util,
-            'duration': duration
+            'l2_util': l2_util
          }
    
    def load_latency_data(self):
       """Load latency data from latency.csv"""
       latency_path = f'data/{self.gpu_type}/latency.csv'
-      if not os.path.exists(latency_path):
-         latency_path = 'data/4090/latency.csv'
-      
       with open(latency_path, 'r') as f:
          lines = f.readlines()
       
@@ -65,40 +57,30 @@ class GKEstimator:
    def load_interference_constants(self):
       """Load interference modeling constants from int_model_constant.csv"""
       const_path = f'data/{self.gpu_type}/int_model_constant.csv'
-      if not os.path.exists(const_path):
-         const_path = 'data/4090/int_model_constant.csv'
       
-      try:
-         with open(const_path, 'r') as f:
-            lines = f.readlines()
-         
-         if len(lines) >= 2:
-            parts = lines[1].strip().split(',')
-            self.interference_constants = {
-               'l2_util_coef1': float(parts[0]),
-               'l2_util_coef2': float(parts[1]),
-               'dram_util_coef1': float(parts[2]),
-               'dram_util_coef2': float(parts[3]),
-               'constant': float(parts[4])
-            }
-         else:
-            # Default to no interference
-            self.interference_constants = {
-               'l2_util_coef1': 0.0,
-               'l2_util_coef2': 0.0,
-               'dram_util_coef1': 0.0,
-               'dram_util_coef2': 0.0,
-               'constant': 1.0
-            }
-      except Exception as e:
-         print(f"Warning: Could not load interference constants: {e}")
-         self.interference_constants = {
-            'l2_util_coef1': 0.0,
-            'l2_util_coef2': 0.0,
-            'dram_util_coef1': 0.0,
-            'dram_util_coef2': 0.0,
-            'constant': 1.0
-         }
+      with open(const_path, 'r') as f:
+         lines = f.readlines()
+      
+      if len(lines) < 2:
+         raise ValueError(f"Invalid int_model_constant.csv: expected at least 2 lines (header + data), got {len(lines)}")
+      
+      parts = lines[1].strip().split(',')
+      if len(parts) < 5:
+         raise ValueError(f"Invalid int_model_constant.csv: expected 5 values, got {len(parts)}")
+      
+      self.interference_constants = {
+         'l2_util_coef1': float(parts[0]),
+         'l2_util_coef2': float(parts[1]),
+         'dram_util_coef1': float(parts[2]),
+         'dram_util_coef2': float(parts[3]),
+         'constant': float(parts[4])
+      }
+   
+   def get_available_batch_sizes(self, model_name):
+      """Get list of available batch sizes for a model"""
+      if model_name not in self.profile_data:
+         return []
+      return sorted(self.profile_data[model_name].keys())
    
    def get_c_req_m_req(self, model_name, batch_size):
       """Get C_req and M_req for a model at a specific batch size"""
@@ -134,10 +116,7 @@ class GKEstimator:
    def get_latency(self, model_name, batch_size, partition=100):
       """Get latency for a model at a specific batch size and partition"""
       if model_name not in self.latency_data or partition not in self.latency_data[model_name]:
-         # Fallback: estimate from profile data
-         if model_name in self.profile_data and batch_size in self.profile_data[model_name]:
-            return self.profile_data[model_name][batch_size]['duration']
-         return 10.0  # Default latency
+         raise ValueError(f"Latency data not found for model '{model_name}' at partition {partition}")
       
       batch_sizes = sorted(self.latency_data[model_name][partition].keys())
       
@@ -194,7 +173,7 @@ class GKEstimator:
       Calculate interference factor for models sharing a GPU.
       
       Paper formula:
-      Actual_Latency = Base_Latency × interference_factor
+      Actual_Latency = Base_Latency * interference_factor
       
       interference_factor = constant + α·l2_util₁·l2_util₂ + β·dram_util₁·dram_util₂
       

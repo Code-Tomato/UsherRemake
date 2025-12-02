@@ -6,15 +6,18 @@ import argparse
 import sys
 from copy import deepcopy
 
-def group_models(workloads, estimator, max_models_per_group=4):
+def group_models(workloads, estimator, gpu_specs, max_models_per_group=4):
    """
    Group models using k-means variant where sum(C_req) ≈ sum(M_req).
    Distance D = |sum(C_req) - sum(M_req)| is minimized within groups.
    """
+   # Get max GPU memory from specs
+   max_gpu_mem = max(spec['mem_mb'] for spec in gpu_specs)
+   
    # Calculate average C_req and M_req for each workload
    workload_reqs = []
    for wl in workloads:
-      c_req, m_req = estimator.compute_average_c_req_m_req(wl.model_name, 24564)
+      c_req, m_req = estimator.compute_average_c_req_m_req(wl.model_name, max_gpu_mem)
       workload_reqs.append({
          'workload': wl,
          'c_req': c_req,
@@ -161,7 +164,7 @@ def placement(group_workloads, configurations, gpu_pool, estimator, cluster_type
          for gpu, _ in gpu_candidates:
             if gpu.can_fit(c_req, m_req):
                gpu.compute_used += c_req
-               gpu.memory_used += m_req
+               gpu.memory_used += m_req * gpu.max_memory  # Convert fraction to absolute memory
                gpu.model_replicas.append((wl.model_name, bs, replica_id))
                assignments.append(Assignment(wl.model_name, bs, replica_id, gpu.gpu_id, gpu.gpu_type))
                placed = True
@@ -266,19 +269,37 @@ def scheduler(workload_groups, estimator, cluster_type, gpu_specs, initial_gpus=
          cl_m_map[wl.model_name] = cl_m
          print(f"  cl_m for {wl.model_name}: {cl_m}")
       
+      # Get available batch sizes for each model
+      bs_options_per_model = []
+      for wl in group_workloads:
+         available_bs = estimator.get_available_batch_sizes(wl.model_name)
+         bs_options_per_model.append(available_bs)
+         print(f"  {wl.model_name} available batch sizes: {sorted(available_bs)}")
+      
       # Configure search space based on mode
       if fast_mode:
-         # Fast mode: Limit search space
-         BS_OPTIONS = [8, 16, 32, 64]  # Skip extreme sizes
          max_multiplier = 3  # Only try up to 3x replication
          if max_configs_per_group is None:
             max_configs_per_group = 5000  # Limit to 5K configs
          print(f"  Fast mode: Testing up to {max_configs_per_group:,} configurations")
       else:
-         # Exhaustive mode: Full search (paper specification)
-         BS_OPTIONS = [4, 8, 16, 32, 64, 128]
          max_multiplier = 6  # Paper says m = 1, 2, ..., 6
          print(f"  Exhaustive mode: Testing all configurations")
+      
+      # Calculate total combinations for estimation
+      bs_combos = 1
+      for bs_list in bs_options_per_model:
+         bs_combos *= len(bs_list)
+      rd_combos = max_multiplier ** len(group_workloads)
+      total_configs = bs_combos * rd_combos
+      estimated_time = total_configs * 0.000036  # Measured empirically (~0.036 ms per config)
+      print(f"  Estimated configurations: {bs_combos:,} BS combos × {rd_combos:,} RD combos = {total_configs:,} total")
+      if estimated_time < 60:
+         print(f"  Estimated time: {estimated_time:.1f} seconds")
+      elif estimated_time < 3600:
+         print(f"  Estimated time: {estimated_time/60:.1f} minutes")
+      else:
+         print(f"  Estimated time: {estimated_time/3600:.1f} hours")
       
       best_config = None
       best_cost = float('inf')
@@ -287,7 +308,7 @@ def scheduler(workload_groups, estimator, cluster_type, gpu_specs, initial_gpus=
       best_assignments = []
       configs_tested = 0
       
-      for bs_combo in generate_bs_combinations(group_workloads, BS_OPTIONS, max_combinations=None):
+      for bs_combo in generate_bs_combinations(group_workloads, estimator, fast_mode):
          for rd_combo in generate_rd_combinations(group_workloads, cl_m_map, max_multiplier=max_multiplier):
             # Check if we've hit the config limit
             if max_configs_per_group and configs_tested >= max_configs_per_group:
@@ -301,7 +322,7 @@ def scheduler(workload_groups, estimator, cluster_type, gpu_specs, initial_gpus=
             )
             
             # Select based on cluster type
-            if cluster_type == 'fixed':
+            if cluster_type == 'max_goodput':
                # Maximize goodput
                if goodput > best_goodput:
                   best_goodput = goodput
@@ -309,7 +330,7 @@ def scheduler(workload_groups, estimator, cluster_type, gpu_specs, initial_gpus=
                   best_config = configurations
                   best_gpu_pool = updated_gpu_pool
                   best_assignments = assignments
-            else:  # non-fixed
+            else:  # min_cost
                # Minimize cost while meeting SLO
                total_workload = sum(wl.rps for wl in group_workloads)
                if goodput >= total_workload and cost < best_cost:
@@ -318,11 +339,6 @@ def scheduler(workload_groups, estimator, cluster_type, gpu_specs, initial_gpus=
                   best_config = configurations
                   best_gpu_pool = updated_gpu_pool
                   best_assignments = assignments
-                  
-                  # Early termination in fast mode if we found a perfect solution
-                  if fast_mode and cost == 0:  # Using existing GPUs, can't do better
-                     print(f"  Found optimal solution early (cost=0), stopping search")
-                     break
          
          # Break outer loop if we hit config limit
          if max_configs_per_group and configs_tested >= max_configs_per_group:
@@ -342,16 +358,33 @@ def scheduler(workload_groups, estimator, cluster_type, gpu_specs, initial_gpus=
    
    return gpu_pool, all_assignments
 
-def generate_bs_combinations(workloads, bs_options, max_combinations=None):
+def generate_bs_combinations(workloads, estimator, fast_mode=False):
    """
-   Generate batch size combinations.
-   Paper: BS ∈ {4, 8, 16, 32, 64, 128}
+   Generate batch size combinations using only available batch sizes for each model.
    """
    import itertools
-   n = len(workloads)
+   
+   # Get available batch sizes for each model
+   bs_options_per_model = []
+   for wl in workloads:
+      available_bs = estimator.get_available_batch_sizes(wl.model_name)
+      if not available_bs:
+         # Fallback if no data
+         available_bs = [1, 4, 8, 16, 32] if not fast_mode else [8, 16, 32]
+      
+      # Filter to reasonable range based on mode
+      if fast_mode:
+         # Fast mode: only use common batch sizes
+         filtered_bs = [bs for bs in available_bs if bs in [8, 16, 32, 64]]
+         if not filtered_bs:
+            filtered_bs = available_bs[:3] if len(available_bs) >= 3 else available_bs
+         bs_options_per_model.append(filtered_bs)
+      else:
+         # Exhaustive mode: use all available batch sizes
+         bs_options_per_model.append(available_bs)
    
    # Generate all combinations
-   all_combos = list(itertools.product(bs_options, repeat=n))
+   all_combos = list(itertools.product(*bs_options_per_model))
    
    return all_combos
 
@@ -373,8 +406,8 @@ def generate_rd_combinations(workloads, cl_m_map, max_multiplier=6):
 
 def main():
    parser = argparse.ArgumentParser(description='USHER Scheduler')
-   parser.add_argument('--cluster-type', choices=['fixed', 'non-fixed'], default='non-fixed',
-                      help='Cluster type: fixed (maximize goodput) or non-fixed (minimize cost)')
+   parser.add_argument('--cluster-type', choices=['max_goodput', 'min_cost'], default='min_cost',
+                      help='Cluster type: max_goodput (maximize goodput) or min_cost (minimize cost)')
    parser.add_argument('--gpu-type', default='4090', help='GPU type to use')
    parser.add_argument('--input', default='input.csv', help='Input workload file')
    parser.add_argument('--output', default='schedule_output.json', help='Output JSON file')
@@ -389,7 +422,12 @@ def main():
    print("="*60)
    
    # Load configurations
-   gpu_specs = load_gpu_config()
+   all_gpu_specs = load_gpu_config()
+   
+   # Filter to only the requested GPU type
+   gpu_specs = [spec for spec in all_gpu_specs if spec['type'] == args.gpu_type]
+   if not gpu_specs:
+      raise ValueError(f"GPU type '{args.gpu_type}' not found in device-config.json. Available types: {[s['type'] for s in all_gpu_specs]}")
    
    # Initialize GK-Estimator
    estimator = GKEstimator(gpu_type=args.gpu_type)
@@ -406,7 +444,7 @@ def main():
       print(f"Interference modeling: DISABLED (using base latencies)")
    
    # Parse input workload
-   workloads = parse_input_workload(args.input)
+   workloads = parse_input_workload(args.input, args.gpu_type)
    print(f"\nLoaded {len(workloads)} workload requests:")
    for wl in workloads:
       print(f"  {wl}")
@@ -414,27 +452,40 @@ def main():
    # Group models
    print(f"\n{'='*60}")
    print("Grouping models...")
-   workload_groups = group_models(workloads, estimator)
+   workload_groups = group_models(workloads, estimator, gpu_specs)
    print(f"Created {len(workload_groups)} groups")
    
    # Estimate configuration space and runtime
    print(f"\n{'='*60}")
    print("Configuration Space Estimation:")
-   BS_OPTIONS = 6  # [4, 8, 16, 32, 64, 128]
-   RD_MULTIPLIERS = 6  # [1x, 2x, 3x, 4x, 5x, 6x] * cl_m
    
    for i, group in enumerate(workload_groups):
       num_models = len(group)
-      bs_combos = BS_OPTIONS ** num_models
-      rd_combos = RD_MULTIPLIERS ** num_models
+      
+      # Get actual available batch sizes for each model
+      bs_options_per_model = []
+      for wl in group:
+         available_bs = estimator.get_available_batch_sizes(wl.model_name)
+         if not available_bs:
+            available_bs = [1, 4, 8, 16, 32]  # Fallback
+         bs_options_per_model.append(available_bs)
+      
+      # Calculate actual combinations
+      bs_combos = 1
+      for bs_list in bs_options_per_model:
+         bs_combos *= len(bs_list)
+      
+      rd_combos = 6 ** num_models  # RD multipliers: 1-6x
       total_configs = bs_combos * rd_combos
       
-      # Estimate time: ~0.001 seconds per configuration tested
-      estimated_seconds = total_configs * 0.001
+      # Estimate time: ~0.000036 seconds per configuration (measured empirically)
+      estimated_seconds = total_configs * 0.000036
       
       print(f"\nGroup {i+1} ({num_models} models):")
-      print(f"  BS combinations: {BS_OPTIONS}^{num_models} = {bs_combos:,}")
-      print(f"  RD combinations: {RD_MULTIPLIERS}^{num_models} = {rd_combos:,}")
+      bs_counts = [len(bs_list) for bs_list in bs_options_per_model]
+      bs_formula = " × ".join(str(c) for c in bs_counts)
+      print(f"  BS combinations: {bs_formula} = {bs_combos:,}")
+      print(f"  RD combinations: 6^{num_models} = {rd_combos:,}")
       print(f"  Total configurations: {total_configs:,}")
       
       if estimated_seconds < 60:
@@ -448,7 +499,7 @@ def main():
       
       if total_configs > 100000000:  # 100 million
          print(f"  WARNING: Configuration space is extremely large!")
-         print(f"           Consider reducing the number of models or limiting search space.")
+         print(f"           Consider using --fast mode or --max-configs to limit search space.")
    
    print(f"\n{'='*60}")
    if args.fast:

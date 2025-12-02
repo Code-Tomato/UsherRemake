@@ -62,8 +62,9 @@ class GPU:
          self.model_replicas = []
    
    def can_fit(self, c_req: float, m_req: float) -> bool:
+      # c_req and m_req are fractions (0-1), memory_used is absolute MB
       return (self.compute_used + c_req <= self.max_compute and 
-              self.memory_used + m_req <= self.max_memory)
+              self.memory_used + m_req * self.max_memory <= self.max_memory)
    
    def remaining_space(self) -> float:
       return (self.max_compute - self.compute_used) + (self.max_memory - self.memory_used)
