@@ -43,6 +43,11 @@ Model names must match exactly with those in `data/<gpu_type>/profile.csv`.
 
 ## Paper Interpretation
 
+## Assumptions
+
+- Scheduler runs against a homogeneous GPU cluster; provide a single GPU type per invocation.
+- Reported cost equals the number of GPUs provisioned (normalized cost=1 per GPU) because all GPUs share the same type.
+
 ### 1. Model Grouping
 - Calculate average C_req and M_req for each model
 - Iteratively merge groups to minimize D = |∑C_req - ∑M_req|

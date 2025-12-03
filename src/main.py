@@ -1,11 +1,12 @@
 import math
 import itertools
+import os
+from pathlib import Path
 from file_parse import parse_input_workload, load_gpu_config
 from gk_estimator import GKEstimator, compute_cl_m
 from objects_dataclass import WorkloadRequest, GPU, Assignment, Classification
 import json
 import argparse
-import sys
 from copy import deepcopy
 
 def group_models(workloads: list[WorkloadRequest], estimator: GKEstimator, gpu_specs: list[dict], max_models_per_group: int = 4) -> list[list[WorkloadRequest]]:
@@ -88,6 +89,11 @@ def group_models(workloads: list[WorkloadRequest], estimator: GKEstimator, gpu_s
    
    return result_groups
 
+def fallback_batch_sizes(fast_mode: bool) -> list[int]:
+   """Default batch sizes when model-specific data is unavailable."""
+   return [1, 4, 8, 16, 32] if not fast_mode else [8, 16, 32]
+
+
 def placement(group_workloads, configurations, gpu_pool, estimator, cluster_type, gpu_specs):
    """
    Placement algorithm (Algorithm 2 from paper).
@@ -100,6 +106,13 @@ def placement(group_workloads, configurations, gpu_pool, estimator, cluster_type
    config_map = {}
    for i, wl in enumerate(group_workloads):
       config_map[wl.model_name] = configurations[i]
+   
+   group_model_names = {wl.model_name for wl in group_workloads}
+   group_gpu_ids = {
+      gpu.gpu_id
+      for gpu in gpu_pool
+      if any(model_name in group_model_names for model_name, _, _ in getattr(gpu, "model_replicas", []))
+   }
    
    # Classify models as C-heavy, M-heavy, or balanced
    model_info = []
@@ -160,14 +173,21 @@ def placement(group_workloads, configurations, gpu_pool, estimator, cluster_type
          
          # Try to place in existing GPUs (prioritize those with least remaining space)
          # Check if this GPU already has a replica of this model
-         gpu_candidates = []
+         group_gpu_candidates = []
+         other_gpu_candidates = []
          for gpu in gpu_pool:
             # Check if this GPU already has this model
             has_this_model = any(m_name == wl.model_name for m_name, _, _ in gpu.model_replicas)
             if gpu.can_fit(c_req, m_req) and not has_this_model:
-               gpu_candidates.append((gpu, gpu.remaining_space()))
+               candidate = (gpu, gpu.remaining_space())
+               if gpu.gpu_id in group_gpu_ids:
+                  group_gpu_candidates.append(candidate)
+               else:
+                  other_gpu_candidates.append(candidate)
          
-         gpu_candidates.sort(key=lambda x: x[1])  # Ascending remaining space
+         group_gpu_candidates.sort(key=lambda x: x[1])  # Ascending remaining space
+         other_gpu_candidates.sort(key=lambda x: x[1])
+         gpu_candidates = group_gpu_candidates + other_gpu_candidates
          
          for gpu, _ in gpu_candidates:
             if gpu.can_fit(c_req, m_req):
@@ -175,11 +195,15 @@ def placement(group_workloads, configurations, gpu_pool, estimator, cluster_type
                gpu.memory_used += m_req * gpu.max_memory  # Convert fraction to absolute memory
                gpu.model_replicas.append((wl.model_name, bs, replica_id))
                assignments.append(Assignment(wl.model_name, bs, replica_id, gpu.gpu_id, gpu.gpu_type))
+               group_gpu_ids.add(gpu.gpu_id)
                placed = True
                break
          
          # If not placed, create a new GPU
          if not placed:
+            if cluster_type == 'max_goodput':
+               # Fixed cluster: cannot provision additional GPUs
+               return float('inf'), 0, gpu_pool, []
             # Find cheapest GPU type that can fit
             best_gpu_spec = None
             for spec in gpu_specs:
@@ -207,6 +231,7 @@ def placement(group_workloads, configurations, gpu_pool, estimator, cluster_type
             gpu_pool.append(new_gpu)
             assignments.append(Assignment(wl.model_name, bs, replica_id, new_gpu.gpu_id, new_gpu.gpu_type))
             total_cost += new_gpu.cost
+            group_gpu_ids.add(new_gpu.gpu_id)
    
    # Calculate total goodput with interference modeling
    total_goodput = 0
@@ -272,8 +297,7 @@ def scheduler(workload_groups, estimator, cluster_type, gpu_specs, initial_gpus=
       # Calculate cl_m for each model
       cl_m_map = {}
       for wl in group_workloads:
-         max_gpu_mem = max(spec['mem_mb'] for spec in gpu_specs)
-         cl_m = compute_cl_m(wl, wl.model_name, wl.slo_ms, max_gpu_mem, estimator)
+         cl_m = compute_cl_m(wl, wl.model_name, wl.slo_ms, estimator)
          cl_m_map[wl.model_name] = cl_m
          print(f"  cl_m for {wl.model_name}: {cl_m}")
       
@@ -331,8 +355,9 @@ def scheduler(workload_groups, estimator, cluster_type, gpu_specs, initial_gpus=
             
             # Select based on cluster type
             if cluster_type == 'max_goodput':
-               # Maximize goodput
-               if goodput > best_goodput:
+               # Maximize goodput with cost-based tie-breaker
+               if (goodput > best_goodput or
+                     (goodput == best_goodput and cost < best_cost)):
                   best_goodput = goodput
                   best_cost = cost
                   best_config = configurations
@@ -377,7 +402,7 @@ def generate_bs_combinations(workloads, estimator, fast_mode=False):
       available_bs = estimator.get_available_batch_sizes(wl.model_name)
       if not available_bs:
          # Fallback if no data
-         available_bs = [1, 4, 8, 16, 32] if not fast_mode else [8, 16, 32]
+         available_bs = fallback_batch_sizes(fast_mode)
       
       # Filter to reasonable range based on mode
       if fast_mode:
@@ -411,33 +436,24 @@ def generate_rd_combinations(workloads, cl_m_map, max_multiplier=6):
    
    return list(itertools.product(*rd_options_per_model))
 
-def main():
-   parser = argparse.ArgumentParser(description='USHER Scheduler')
-   parser.add_argument('--cluster-type', choices=['max_goodput', 'min_cost'], default='min_cost',
-                      help='Cluster type: max_goodput (maximize goodput) or min_cost (minimize cost)')
-   parser.add_argument('--gpu-type', default='4090', help='GPU type to use')
-   parser.add_argument('--input', default='input.csv', help='Input workload file')
-   parser.add_argument('--output', default='schedule_output.json', help='Output JSON file')
-   parser.add_argument('--fast', action='store_true',
-                      help='Fast mode: limit search space for speed (recommended for large workloads)')
-   parser.add_argument('--max-configs', type=int, default=None,
-                      help='Maximum configurations to test per group (default: unlimited in normal mode, 5000 in fast mode)')
-   
-   args = parser.parse_args()
-   
-   print(f"USHER Scheduler - Cluster Type: {args.cluster_type}, GPU: {args.gpu_type}")
+def process_single_file(input_file, output_file, cluster_type, gpu_type, fast_mode, max_configs_per_group):
+   """Process a single input file and generate output."""
+   print(f"\n{'='*80}")
+   print(f"Processing: {input_file}")
+   print(f"{'='*80}")
+   print(f"USHER Scheduler - Cluster Type: {cluster_type}, GPU: {gpu_type}")
    print("="*60)
    
    # Load configurations
    all_gpu_specs = load_gpu_config()
    
    # Filter to only the requested GPU type
-   gpu_specs = [spec for spec in all_gpu_specs if spec['type'] == args.gpu_type]
+   gpu_specs = [spec for spec in all_gpu_specs if spec['type'] == gpu_type]
    if not gpu_specs:
-      raise ValueError(f"GPU type '{args.gpu_type}' not found in device-config.json. Available types: {[s['type'] for s in all_gpu_specs]}")
+      raise ValueError(f"GPU type '{gpu_type}' not found in device-config.json. Available types: {[s['type'] for s in all_gpu_specs]}")
    
    # Initialize GK-Estimator
-   estimator = GKEstimator(gpu_type=args.gpu_type)
+   estimator = GKEstimator(gpu_type=gpu_type)
    
    # Show interference modeling status
    if estimator.interference_constants.get('constant', 1.0) != 1.0:
@@ -451,7 +467,7 @@ def main():
       print(f"Interference modeling: DISABLED (using base latencies)")
    
    # Parse input workload
-   workloads = parse_input_workload(args.input, args.gpu_type)
+   workloads = parse_input_workload(input_file, gpu_type)
    print(f"\nLoaded {len(workloads)} workload requests:")
    for wl in workloads:
       print(f"  {wl}")
@@ -474,7 +490,7 @@ def main():
       for wl in group:
          available_bs = estimator.get_available_batch_sizes(wl.model_name)
          if not available_bs:
-            available_bs = [1, 4, 8, 16, 32]  # Fallback
+            available_bs = fallback_batch_sizes(fast_mode)
          bs_options_per_model.append(available_bs)
       
       # Calculate actual combinations
@@ -509,7 +525,7 @@ def main():
          print(f"           Consider using --fast mode or --max-configs to limit search space.")
    
    print(f"\n{'='*60}")
-   if args.fast:
+   if fast_mode:
       print("Starting scheduler in FAST MODE...")
       print("(Limited search space for speed)")
    else:
@@ -520,8 +536,8 @@ def main():
    start_time = time.time()
    
    # Schedule
-   gpu_pool, assignments = scheduler(workload_groups, estimator, args.cluster_type, gpu_specs, 
-                                     fast_mode=args.fast, max_configs_per_group=args.max_configs)
+   gpu_pool, assignments = scheduler(workload_groups, estimator, cluster_type, gpu_specs, 
+                                     fast_mode=fast_mode, max_configs_per_group=max_configs_per_group)
    
    end_time = time.time()
    elapsed = end_time - start_time
@@ -550,19 +566,122 @@ def main():
          print(f"        Compute: {compute_alloc:.3f} ({compute_alloc*100:.1f}%), Memory: {memory_alloc_mb:.2f} MB ({m_req*100:.1f}%)")
    
    # Export to JSON
+   gpus_data = []
+   for gpu in gpu_pool:
+      gpu_data = {
+         "id": gpu.gpu_id,
+         "type": gpu.gpu_type,
+         "compute": {
+            "used": round(gpu.compute_used, 2),
+            "total": round(gpu.max_compute, 2)
+         },
+         "memory": {
+            "used": round(gpu.memory_used, 2),
+            "total": round(gpu.max_memory, 2)
+         },
+         "models": []
+      }
+      
+      # Calculate and add interference factor if multiple models
+      if len(gpu.model_replicas) > 1:
+         models_on_gpu = [(m_name, m_bs) for m_name, m_bs, _ in gpu.model_replicas]
+         interference_factor = estimator.calculate_interference_factor(models_on_gpu)
+         gpu_data["interference_factor"] = round(interference_factor, 3)
+      
+      # Add model information
+      for model_name, bs, replica_id in gpu.model_replicas:
+         # Get compute and memory requirements for this model
+         c_req, m_req = estimator.get_c_req_m_req(model_name, bs)
+         compute_percent = round(c_req * 100, 1)
+         memory_percent = round(m_req * 100, 1)
+         
+         model_data = {
+            "model": model_name,
+            "batch_size": bs,
+            "replica_id": replica_id,
+            "compute_percent": compute_percent,
+            "memory_percent": memory_percent
+         }
+         gpu_data["models"].append(model_data)
+      
+      gpus_data.append(gpu_data)
+   
    output_data = {
-      "cluster_type": args.cluster_type,
-      "gpu_type": args.gpu_type,
+      "cluster_type": cluster_type,
+      "gpu_type": gpu_type,
       "total_gpus": len(gpu_pool),
-      "assignments": [a.to_dict(include_replica_id=False) for a in assignments]
+      "gpus": gpus_data
    }
    
-   with open(args.output, 'w') as f:
+   # Ensure output directory exists
+   output_path = Path(output_file)
+   output_path.parent.mkdir(parents=True, exist_ok=True)
+   
+   with open(output_file, 'w') as f:
       json.dump(output_data, f, indent=2)
    
    print(f"\n{'='*60}")
-   print(f"Schedule exported to {args.output}")
+   print(f"Schedule exported to {output_file}")
    print(f"{'='*60}")
+
+def main():
+   parser = argparse.ArgumentParser(description='USHER Scheduler')
+   parser.add_argument('--cluster-type', choices=['max_goodput', 'min_cost'], default='min_cost',
+                      help='Cluster type: max_goodput (maximize goodput) or min_cost (minimize cost)')
+   parser.add_argument('--gpu-type', default='4090', help='GPU type to use')
+   parser.add_argument('--input', default='input.csv', help='Input workload file or directory containing CSV files')
+   parser.add_argument('--output', default=None, help='Output JSON file (only used for single file input; ignored for directories)')
+   parser.add_argument('--fast', action='store_true',
+                      help='Fast mode: limit search space for speed (recommended for large workloads)')
+   parser.add_argument('--max-configs', type=int, default=None,
+                      help='Maximum configurations to test per group (default: unlimited in normal mode, 5000 in fast mode)')
+   
+   args = parser.parse_args()
+   
+   input_path = Path(args.input)
+   
+   # Determine if input is a file or directory
+   if not input_path.exists():
+      raise FileNotFoundError(f"Input path '{args.input}' does not exist")
+   
+   # Create outputs directory if it doesn't exist
+   outputs_dir = Path('outputs')
+   outputs_dir.mkdir(exist_ok=True)
+   
+   if input_path.is_file():
+      # Single file mode
+      if args.output:
+         output_file = args.output
+      else:
+         # Generate output filename from input filename
+         output_file = outputs_dir / f"{input_path.stem}.json"
+      
+      process_single_file(str(input_path), str(output_file), args.cluster_type, args.gpu_type, 
+                          args.fast, args.max_configs)
+   
+   elif input_path.is_dir():
+      # Directory mode - process all CSV files
+      csv_files = sorted(input_path.glob('*.csv'))
+      
+      if not csv_files:
+         print(f"No CSV files found in directory '{args.input}'")
+         return
+      
+      print(f"Found {len(csv_files)} CSV file(s) to process")
+      
+      for csv_file in csv_files:
+         # Generate output filename based on input filename
+         output_file = outputs_dir / f"{csv_file.stem}.json"
+         try:
+            process_single_file(str(csv_file), str(output_file), args.cluster_type, args.gpu_type, 
+                              args.fast, args.max_configs)
+         except Exception as e:
+            print(f"\nERROR processing {csv_file}: {e}")
+            print(f"Skipping to next file...\n")
+            continue
+   
+   else:
+      raise ValueError(f"Input path '{args.input}' is neither a file nor a directory")
 
 if __name__ == "__main__":
    main()

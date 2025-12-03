@@ -1,6 +1,5 @@
 from objects_dataclass import WorkloadRequest
 import json
-import os
 
 def load_gpu_config():
    """Load GPU configurations from device-config.json"""

@@ -1,8 +1,7 @@
 import numpy as np
-import os
 
 class GKEstimator:
-   def __init__(self, gpu_type='4090'):
+   def __init__(self, gpu_type):
       self.gpu_type = gpu_type
       self.profile_data = {}  # {model_name: {batch_size: {c_util, m_util, l2_util}}}
       self.latency_data = {}  # {model_name: {partition: {batch_size: latency}}}
@@ -40,7 +39,7 @@ class GKEstimator:
       with open(latency_path, 'r') as f:
          lines = f.readlines()
       
-      for line in lines:
+      for line in lines[1:]:
          parts = line.strip().split(',')
          model_name = parts[0].strip()
          partition = int(parts[1].strip())
@@ -132,22 +131,30 @@ class GKEstimator:
       return float(np.interp(batch_size, batch_sizes, latencies))
    
    def compute_average_c_req_m_req(self, model_name, max_memory_mb):
-      """Compute average C_req and M_req across all valid batch sizes"""
-      batch_sizes = [4, 8, 16, 32, 64, 128]
+      """Compute average C_req and M_req across batch sizes that fit on the GPU."""
+      if model_name not in self.profile_data:
+         return 0.5, 0.5
+      
+      batch_sizes = sorted(self.profile_data[model_name].keys())
       valid_c_reqs = []
       valid_m_reqs = []
       
       for bs in batch_sizes:
-         c_req, m_req = self.get_c_req_m_req(model_name, bs)
-         # Check if memory requirement is within GPU capacity (rough estimate)
-         # Assuming m_req is a fraction and we have model memory info
-         valid_c_reqs.append(c_req)
-         valid_m_reqs.append(m_req)
+         profile_entry = self.profile_data[model_name][bs]
+         c_util = profile_entry['c_util'] / 100.0
+         m_util = profile_entry['m_util'] / 100.0
+         
+         required_memory_mb = m_util * max_memory_mb
+         if c_util > 1.0 or required_memory_mb > max_memory_mb:
+            break
+         
+         valid_c_reqs.append(c_util)
+         valid_m_reqs.append(m_util)
       
       if not valid_c_reqs:
          return 0.5, 0.5
       
-      return np.mean(valid_c_reqs), np.mean(valid_m_reqs)
+      return float(np.mean(valid_c_reqs)), float(np.mean(valid_m_reqs))
    
    def get_l2_util(self, model_name, batch_size):
       """Get L2 cache utilization for interference modeling"""
@@ -172,10 +179,14 @@ class GKEstimator:
       """
       Calculate interference factor for models sharing a GPU.
       
-      Paper formula:
-      Actual_Latency = Base_Latency * interference_factor
+      Actual_Latency = Base_Latency × interference_factor
       
-      interference_factor = constant + α·l2_util₁·l2_util₂ + β·dram_util₁·dram_util₂
+      Current model uses a linear regression fit:
+         interference_factor = bias
+            + w_l2_m1 * l2_util_1 + w_l2_m2 * l2_util_2
+            + w_dram_m1 * dram_util_1 + w_dram_m2 * dram_util_2
+      
+      Coefficients (w_*) and bias are loaded from int_model_constant.csv.
       
       Args:
          models_on_gpu: List of (model_name, batch_size) tuples
@@ -186,17 +197,33 @@ class GKEstimator:
       if len(models_on_gpu) <= 1:
          return 1.0  # No interference with single model
       
-      # For simplicity, calculate pairwise interference between first two models
-      # Full implementation would consider all pairs
-      model1_name, bs1 = models_on_gpu[0]
-      model2_name, bs2 = models_on_gpu[1]
+      per_model_stats = {}
+      for model_name, bs in models_on_gpu:
+         l2_util = self.get_l2_util(model_name, bs)
+         _, dram_util = self.get_c_req_m_req(model_name, bs)
+         stats = per_model_stats.setdefault(
+            model_name, {"l2": 0.0, "dram": 0.0, "count": 0}
+         )
+         stats["l2"] += l2_util
+         stats["dram"] += dram_util
+         stats["count"] += 1
       
-      # Get utilization metrics
-      l2_util_1 = self.get_l2_util(model1_name, bs1)
-      l2_util_2 = self.get_l2_util(model2_name, bs2)
+      if len(per_model_stats) <= 1:
+         return 1.0
       
-      _, dram_util_1 = self.get_c_req_m_req(model1_name, bs1)
-      _, dram_util_2 = self.get_c_req_m_req(model2_name, bs2)
+      aggregated_models = []
+      for model_name, stats in per_model_stats.items():
+         count = stats["count"] if stats["count"] > 0 else 1
+         avg_l2 = stats["l2"] / count
+         avg_dram = stats["dram"] / count
+         heaviness = avg_l2 + avg_dram
+         l2_used = max(0.0, min(1.0, avg_l2))
+         dram_used = max(0.0, min(1.0, avg_dram))
+         aggregated_models.append((model_name, l2_used, dram_used, heaviness))
+      
+      aggregated_models.sort(key=lambda item: item[3], reverse=True)
+      model1_name, l2_util_1, dram_util_1, _ = aggregated_models[0]
+      model2_name, l2_util_2, dram_util_2, _ = aggregated_models[1]
       
       # Calculate interference factor
       α1 = self.interference_constants['l2_util_coef1']
@@ -212,33 +239,40 @@ class GKEstimator:
       # Clamp to reasonable range
       return max(1.0, min(3.0, interference_factor))
 
-def compute_cl_m(workload, model_name, slo_ms, max_gpu_memory, estimator):
+def compute_cl_m(workload, model_name, slo_ms, estimator):
    """
-   Compute minimum replication degree (cl_m) for a model.
-   This is the minimum number of GPUs needed to satisfy the SLO.
+   Compute minimum replication degree (cl_m) for a model while honoring the SLO.
+   Evaluates available batch sizes, discarding those that violate the latency SLO
+   or exceed a single GPU's memory budget.
    """
-   # Find the highest batch size that fits in GPU memory
-   batch_sizes = [128, 64, 32, 16, 8, 4]
-   max_bs = 4
+   candidate_batch_sizes = estimator.get_available_batch_sizes(model_name)
+   if not candidate_batch_sizes:
+      candidate_batch_sizes = [4, 8, 16, 32, 64, 128]
    
-   for bs in batch_sizes:
+   best_bs = None
+   best_throughput = 0.0
+   
+   for bs in candidate_batch_sizes:
       c_req, m_req = estimator.get_c_req_m_req(model_name, bs)
-      # Simple check: if m_req seems reasonable, use this batch size
-      if m_req < 0.9:  # Leave some headroom
-         max_bs = bs
-         break
+      if m_req >= 0.9:
+         continue
+      
+      latency_ms = estimator.get_latency(model_name, bs)
+      if latency_ms > slo_ms:
+         continue
+      
+      throughput = (bs / latency_ms) * 1000.0
+      if throughput > best_throughput:
+         best_throughput = throughput
+         best_bs = bs
    
-   # Get latency for max batch size
-   latency_ms = estimator.get_latency(model_name, max_bs)
+   if best_bs is None:
+      fallback_bs = min(candidate_batch_sizes)
+      print(f"[WARN] {model_name}: no batch size satisfies SLO {slo_ms} ms "
+            f"with m_req < 0.9; falling back to BS={fallback_bs}")
+      latency_ms = estimator.get_latency(model_name, fallback_bs)
+      best_throughput = (fallback_bs / latency_ms) * 1000.0
+      best_bs = fallback_bs
    
-   # Calculate throughput per GPU (requests/second)
-   throughput_per_gpu = (max_bs / latency_ms) * 1000  # Convert ms to seconds
-   
-   # Calculate required number of GPUs based on RPS
-   rps = workload.rps
-   required_gpus = int(np.ceil(rps / throughput_per_gpu))
-   
-   # Ensure at least 1 GPU
-   cl_m = max(1, required_gpus)
-   
-   return cl_m
+   required_gpus = int(np.ceil(workload.rps / max(best_throughput, 1e-6)))
+   return max(1, required_gpus)

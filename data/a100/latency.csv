@@ -1,3 +1,4 @@
+model_name,partition,batch_size,latency_ms
 densenet161,14,1,12.27426529
 densenet161,29,1,11.74592972
 densenet161,43,1,12.27021217

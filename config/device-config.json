@@ -9,7 +9,7 @@
 		},
 		{
 			"type":"a100",
-			"mem_mb":40960,
+			"mem_mb":81920,
 			"latency_prof_file": "data/a100/latency.csv",
 			"interference_const_file": "data/a100/int_model_constant.csv",
 			"interference_util_file": "data/a100/profile.csv"

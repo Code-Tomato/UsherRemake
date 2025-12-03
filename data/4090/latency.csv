@@ -1,3 +1,4 @@
+model_name,partition,batch_size,latency_ms
 bert,20,4,35.534661835748786
 bert,40,4,17.767330917874393
 bert,50,4,14.213864734299515
