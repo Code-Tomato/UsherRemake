@@ -1,3 +1,5 @@
+import math
+import itertools
 from file_parse import parse_input_workload, load_gpu_config
 from gk_estimator import GKEstimator, compute_cl_m
 from objects_dataclass import WorkloadRequest, GPU, Assignment, Classification
@@ -6,7 +8,7 @@ import argparse
 import sys
 from copy import deepcopy
 
-def group_models(workloads, estimator, gpu_specs, max_models_per_group=4):
+def group_models(workloads: list[WorkloadRequest], estimator: GKEstimator, gpu_specs: list[dict], max_models_per_group: int = 4) -> list[list[WorkloadRequest]]:
    """
    Group models using k-means variant where sum(C_req) ≈ sum(M_req).
    Distance D = |sum(C_req) - sum(M_req)| is minimized within groups.
@@ -28,7 +30,6 @@ def group_models(workloads, estimator, gpu_specs, max_models_per_group=4):
    groups = [[wr] for wr in workload_reqs]
    
    # Determine number of passes (p) such that 2^p = max_models_per_group
-   import math
    num_passes = int(math.log2(max_models_per_group))
    
    # Perform k-means-like merging
@@ -158,7 +159,14 @@ def placement(group_workloads, configurations, gpu_pool, estimator, cluster_type
          placed = False
          
          # Try to place in existing GPUs (prioritize those with least remaining space)
-         gpu_candidates = [(gpu, gpu.remaining_space()) for gpu in gpu_pool if gpu.can_fit(c_req, m_req)]
+         # Check if this GPU already has a replica of this model
+         gpu_candidates = []
+         for gpu in gpu_pool:
+            # Check if this GPU already has this model
+            has_this_model = any(m_name == wl.model_name for m_name, _, _ in gpu.model_replicas)
+            if gpu.can_fit(c_req, m_req) and not has_this_model:
+               gpu_candidates.append((gpu, gpu.remaining_space()))
+         
          gpu_candidates.sort(key=lambda x: x[1])  # Ascending remaining space
          
          for gpu, _ in gpu_candidates:
@@ -362,7 +370,6 @@ def generate_bs_combinations(workloads, estimator, fast_mode=False):
    """
    Generate batch size combinations using only available batch sizes for each model.
    """
-   import itertools
    
    # Get available batch sizes for each model
    bs_options_per_model = []
@@ -535,7 +542,12 @@ def main():
          print(f"    Interference factor: {interference_factor:.3f}x")
       
       for model_name, bs, replica_id in gpu.model_replicas:
+         # Get compute and memory requirements for this model
+         c_req, m_req = estimator.get_c_req_m_req(model_name, bs)
+         compute_alloc = c_req  # Fraction of compute
+         memory_alloc_mb = m_req * gpu.max_memory  # Absolute memory in MB
          print(f"    - {model_name} (BS={bs}, Replica={replica_id})")
+         print(f"        Compute: {compute_alloc:.3f} ({compute_alloc*100:.1f}%), Memory: {memory_alloc_mb:.2f} MB ({m_req*100:.1f}%)")
    
    # Export to JSON
    output_data = {
