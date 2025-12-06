@@ -2,21 +2,36 @@
 
 Implementation of the USHER scheduler - an interference-aware GPU scheduler for DNN inference workloads.
 
-## Installation
+## Installation (Local python or docker available)
+
+### Local Installation
 
 ```bash
 pip install -r requirements.txt
 ```
 
-## Usage
+Tun the scheduler:
+```bash
+python3 src/main.py --gpu-type a100 --input inputs/
+```
+
+### Docker Installation
+
+Build the Docker image:
 
 ```bash
-# Fast mode (recommended)
-python src/main.py --fast --cluster-type min_cost --gpu-type a100 --input input.csv
-
-# Exhaustive mode
-python src/main.py --cluster-type min_cost --gpu-type a100 --input input.csv
+docker build -t usher-scheduler .
 ```
+
+Run the scheduler:
+
+```bash
+# Process all CSV files in inputs directory
+docker run --rm -v $(pwd)/outputs:/app/outputs usher-scheduler \
+  python3 src/main.py --gpu-type a100 --input inputs/
+```
+
+The `-v $(pwd)/outputs:/app/outputs` flag mounts your local `outputs` directory so results are saved to your host machine.
 
 ### Arguments
 
